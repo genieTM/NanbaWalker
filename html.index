@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ナンバ歩き 上下動フィードバック</title>
+<style>
+  body { font-family: sans-serif; background: #111; color: #eee; text-align: center; padding: 20px; }
+  button { font-size: 1.2rem; padding: 15px 30px; margin: 15px; border-radius: 8px; border: none; background: #00a8ff; color: white; font-weight: bold; }
+  button.stop { background: #e84118; }
+  .control { margin: 20px auto; max-width: 400px; text-align: left; background: #222; padding: 15px; border-radius: 8px; }
+  label { display: block; margin-bottom: 10px; }
+  input[type="range"] { width: 100%; }
+  #meter { width: 100%; height: 24px; background: #333; border-radius: 12px; overflow: hidden; margin-top: 10px; }
+  #bar { width: 0%; height: 100%; background: #4cd137; transition: width 0.05s; }
+</style>
+</head>
+<body>
+
+  <h2>ステディカム歩行 音響FB</h2>
+  <p>スマホを腰やポケットに固定し、<br>音が消える（無音になる）ように歩きます。</p>
+
+  <button id="toggleBtn">スタート</button>
+
+  <div class="control">
+    <label>不感帯（無音になる許容範囲）: <span id="threshVal">0.8</span> m/s²
+      <input type="range" id="thresh" min="0.1" max="3.0" step="0.1" value="0.8">
+    </label>
+    <label>音程の感度（揺れに対するピッチ変化）: <span id="sensVal">80</span>
+      <input type="range" id="sens" min="20" max="200" step="10" value="80">
+    </label>
+    <div>現在の揺れレベル: <span id="accText">0.00</span> m/s²</div>
+    <div id="meter"><div id="bar"></div></div>
+  </div>
+
+<script>
+let audioCtx, osc, gainNode;
+let isRunning = false;
+let smoothAcc = 0; // ノイズ除去用の平滑化変数
+
+const toggleBtn = document.getElementById('toggleBtn');
+const threshInput = document.getElementById('thresh');
+const sensInput = document.getElementById('sens');
+const threshVal = document.getElementById('threshVal');
+const sensVal = document.getElementById('sensVal');
+const accText = document.getElementById('accText');
+const bar = document.getElementById('bar');
+
+threshInput.oninput = () => threshVal.textContent = threshInput.value;
+sensInput.oninput = () => sensVal.textContent = sensInput.value;
+
+toggleBtn.onclick = async () => {
+  if (!isRunning) {
+    // iOS等でのセンサー許可リクエスト対応（Androidでは自動通過）
+    if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
+      const res = await DeviceMotionEvent.requestPermission();
+      if (res !== 'granted') return alert('センサーの許可が必要です');
+    }
+    startAudio();
+    window.addEventListener('devicemotion', handleMotion);
+    toggleBtn.textContent = 'ストップ';
+    toggleBtn.classList.add('stop');
+    isRunning = true;
+  } else {
+    window.removeEventListener('devicemotion', handleMotion);
+    if (audioCtx) audioCtx.close();
+    toggleBtn.textContent = 'スタート';
+    toggleBtn.classList.remove('stop');
+    isRunning = false;
+    bar.style.width = '0%';
+  }
+};
+
+function startAudio() {
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  osc = audioCtx.createOscillator();
+  gainNode = audioCtx.createGain();
+
+  osc.type = 'sine'; // 耳に優しいサイン波
+  osc.frequency.value = 440; // 中心周波数 440Hz
+  gainNode.gain.value = 0; // 初期は無音
+
+  osc.connect(gainNode);
+  gainNode.connect(audioCtx.destination);
+  osc.start();
+}
+
+function handleMotion(event) {
+  // 重力を除いた純粋な加速度を取得（非対応端末は重力込みで代用）
+  const acc = event.acceleration && event.acceleration.y !== null 
+              ? event.acceleration 
+              : event.accelerationIncludingGravity;
+  if (!acc) return;
+
+  // 端末の向きに依存しにくいよう、3軸の合成ベクトル（または上下軸）の大きさを計算
+  // ポケットに縦入れしている場合は主に y 軸が上下動に対応
+  const rawVertical = acc.y || 0;
+
+  // ローパスフィルタで細かな振動ノイズを除去（歩行の上下動のみ抽出）
+  smoothAcc = smoothAcc * 0.8 + rawVertical * 0.2;
+  const absAcc = Math.abs(smoothAcc);
+
+  const threshold = parseFloat(threshInput.value);
+  const sensitivity = parseFloat(sensInput.value);
+  const now = audioCtx.currentTime;
+
+  // 画面メーター更新
+  accText.textContent = absAcc.toFixed(2);
+  bar.style.width = Math.min(absAcc * 25, 100) + '%';
+  bar.style.background = absAcc <= threshold ? '#4cd137' : '#fbc531';
+
+  // 440Hzを中心に加速度に応じて音程を上下させる
+  const targetFreq = 440 + (smoothAcc * sensitivity);
+  osc.frequency.setTargetAtTime(Math.max(110, Math.min(1760, targetFreq)), now, 0.03);
+
+  // 不感帯（threshold）以内なら出力レベルを0に落とす
+  if (absAcc <= threshold) {
+    gainNode.gain.setTargetAtTime(0, now, 0.05);
+  } else {
+    // 閾値を超えた分だけ滑らかに音量を上げる（最大0.3）
+    const targetGain = Math.min((absAcc - threshold) * 0.15, 0.3);
+    gainNode.gain.setTargetAtTime(targetGain, now, 0.03);
+  }
+}
+</script>
+</body>
+</html>
